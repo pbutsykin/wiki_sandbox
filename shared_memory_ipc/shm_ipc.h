@@ -3,8 +3,12 @@
 
 #include <stdint.h>
 #include <time.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
 
 #define compiler_barrier() asm volatile("": : :"memory")
+
+#define memory_barrier() asm volatile("mfence" ::: "memory");
 
 #define cpu_relax() __asm__ volatile("pause\n": : :"memory")
 
@@ -47,10 +51,19 @@ struct shm_ipc_ringb {
 
 struct shm_ipc_header {
     uint32_t magic;
-    uint16_t producer_online, consumer_online;
+    uint32_t producer_online, consumer_online;
+    uint32_t consumer_awaiting;
     struct shm_ipc_ringb ringb[1];
     uint64_t latency[SHM_IPC_LATENCY_ENTRIES_PER_BUFFER];
 };
+
+int futex_wait(int *futex_addr, int expected_val) {
+    return syscall(SYS_futex, futex_addr, FUTEX_WAIT, expected_val, NULL, NULL, 0);
+}
+
+int futex_wake(int *futex_addr, int num) {
+    return syscall(SYS_futex, futex_addr, FUTEX_WAKE, num, NULL, NULL, 0);
+}
 
 /* TODO: invariant tsc is more accurate, but it's uconvenient to compare
  * the result in cycles between different hardware.

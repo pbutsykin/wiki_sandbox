@@ -3,7 +3,6 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <string.h>
-#include <time.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <assert.h>
@@ -45,15 +44,14 @@ static int produce_data(struct shm_ipc_header* header)
         printf("Initialize new shared memory ipc structures.\n");
     }
 
-    header->producer_online = 1;
-
     /* We can use multiple per-cpu buffers to increase throughput */
     struct shm_ipc_ringb* ringb = &header->ringb[0];
 
     srand(time(NULL));
 
-    while(!header->consumer_online)
-        usleep(1000);
+    header->producer_online = 1;
+
+    futex_wait(&header->consumer_online, 0);
 
     for (int i = 0; i < NUM_REQS_TO_SEND; i++) {
         assert(read_once(ringb->head) <= ringb->tail);
@@ -75,6 +73,12 @@ static int produce_data(struct shm_ipc_header* header)
          * need to do anything on x86 arch. But other architectures require WB() barrier.
          */
         ringb->tail++;
+
+        if (header->consumer_awaiting) {
+            header->consumer_awaiting = 0;
+
+            futex_wake(&header->consumer_awaiting, 0);
+        }
 
 #ifdef THROTTLE_MSG_SENDING
         usleep(THROTTLE_MSG_SENDING);

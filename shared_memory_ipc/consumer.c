@@ -9,6 +9,9 @@
 
 #include "shm_ipc.h"
 
+
+#define POLL_ITR_NUM 1024
+
 static inline void read_message(uint64_t latency[], struct shm_ipc_ringb* ringb, uint64_t idx)
 {
     struct shm_ipc_msg* msg = &ringb->buffer[idx % SHM_IPC_MSG_PER_BUFFER];
@@ -40,18 +43,33 @@ static void consume_data(struct shm_ipc_header* header)
         printf("Can't change scheduling priority: %s\n", strerror(errno));
 
     header->consumer_online = 1;
+    futex_wake(&header->consumer_online, 1);
 
     while (likely(header->producer_online)) {
         uint64_t available = read_once(ringb->tail) - ringb->head;
 
+        int loops = POLL_ITR_NUM;
         while (likely(!available)) {
-            /* Simple pulling seems to be the most efficient way to achieve low latency.
-             * It causes one CPU core to be heavily utilized, subsequently hindering
-             * the efficient execution of other tasks.
-             */
-            cpu_relax();
 
-            //TODO: epoll_wait() ?
+            /* Adaptive polling. Wakeup will incur latency costs for certain messages,
+             * but it will also relieve the cpu.
+             */
+            if (unlikely(!loops--)) {
+                header->consumer_awaiting = 1;
+
+                memory_barrier();
+
+                available = read_once(ringb->tail) - ringb->head;
+                if (unlikely(available)) {
+                    header->consumer_awaiting = 0;
+                    break;
+                }
+
+                futex_wait(&header->consumer_awaiting, 1);
+
+                loops = POLL_ITR_NUM;
+            }
+            compiler_barrier();
 
             available = read_once(ringb->tail) - ringb->head;
         }
